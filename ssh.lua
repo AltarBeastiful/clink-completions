@@ -49,17 +49,18 @@ end
 
 -- Expand glob patterns in include paths (e.g., config.d/*)
 local function expand_glob(pattern)
-    local files = w({})
+    local expanded_paths = w({})
+    -- Extract directory before converting to backslashes
+    local dir = pattern:match('^(.*/)[^/]*$') or ''
     -- Use dir command to expand glob patterns on Windows
     local f = io.popen('2>nul dir /b "' .. pattern:gsub('/', '\\') .. '"')
     if f then
-        local dir = pattern:match('^(.*/)[^/]*$') or ''
         for line in f:lines() do
-            table.insert(files, dir .. line)
+            table.insert(expanded_paths, dir .. line)
         end
         f:close()
     end
-    return files
+    return expanded_paths
 end
 
 -- Resolve include path relative to ssh directory
@@ -91,34 +92,41 @@ local function collect_hosts_from_file(filepath, portflag, visited)
 
     for _, line in ipairs(lines) do
         line = line:gsub('(#.*)$', '')
+        local line_lower = line:lower()
 
-        -- Check for Include directive
-        local include_pattern = line:match('^%s*[Ii]nclude%s+(.+)%s*$')
+        -- Check for Include directive (case-insensitive)
+        local include_pattern = line_lower:match('^%s*include%s+')
         if include_pattern then
-            local resolved = resolve_include_path(include_pattern, ssh_dir)
-            -- Check if pattern contains glob characters
-            if resolved:match('[%*%?]') then
-                local expanded_files = expand_glob(resolved)
-                for _, inc_file in ipairs(expanded_files) do
-                    local inc_matches = collect_hosts_from_file(inc_file, portflag, visited)
+            local include_value = line:match('^%s*[Ii][Nn][Cc][Ll][Uu][Dd][Ee]%s+(.+)%s*$')
+            if include_value then
+                local resolved = resolve_include_path(include_value, ssh_dir)
+                -- Check if pattern contains glob characters
+                if resolved:match('[%*%?%[]') then
+                    local expanded_paths = expand_glob(resolved)
+                    for _, inc_file in ipairs(expanded_paths) do
+                        local inc_matches = collect_hosts_from_file(inc_file, portflag, visited)
+                        for _, m in ipairs(inc_matches) do
+                            table.insert(matches, m)
+                        end
+                    end
+                else
+                    local inc_matches = collect_hosts_from_file(resolved, portflag, visited)
                     for _, m in ipairs(inc_matches) do
                         table.insert(matches, m)
                     end
                 end
-            else
-                local inc_matches = collect_hosts_from_file(resolved, portflag, visited)
-                for _, m in ipairs(inc_matches) do
-                    table.insert(matches, m)
-                end
             end
         end
 
-        -- Check for Host directive
-        local host = line:match('^%s*[Hh]ost%s+(.*)$')
-        if host then
-            for pattern in host:gmatch('([^%s]+)') do
-                if not pattern:match('[%*%?/!]') then
-                    table.insert(matches, extract_address(pattern, 'alias', portflag))
+        -- Check for Host directive (case-insensitive)
+        local host_match = line_lower:match('^%s*host%s+')
+        if host_match then
+            local host = line:match('^%s*[Hh][Oo][Ss][Tt]%s+(.*)$')
+            if host then
+                for pattern in host:gmatch('([^%s]+)') do
+                    if not pattern:match('[%*%?/!]') then
+                        table.insert(matches, extract_address(pattern, 'alias', portflag))
+                    end
                 end
             end
         end
