@@ -47,13 +47,74 @@ local function extract_address(pattern, match_type, portflag)
     end
 end
 
--- read all Host entries in the user's ssh config file
-local function list_ssh_hosts(portflag)
+-- Expand glob patterns in include paths (e.g., config.d/*)
+local function expand_glob(pattern)
+    local files = w({})
+    -- Use dir command to expand glob patterns on Windows
+    local f = io.popen('2>nul dir /b "' .. pattern:gsub('/', '\\') .. '"')
+    if f then
+        local dir = pattern:match('^(.*/)[^/]*$') or ''
+        for line in f:lines() do
+            table.insert(files, dir .. line)
+        end
+        f:close()
+    end
+    return files
+end
+
+-- Resolve include path relative to ssh directory
+local function resolve_include_path(include_path, ssh_dir)
+    -- Handle ~ prefix
+    if include_path:match('^~[/\\]') then
+        include_path = clink.get_env("userprofile") .. include_path:sub(2)
+    -- Handle relative paths (not starting with / or drive letter)
+    elseif not include_path:match('^[/\\]') and not include_path:match('^%a:') then
+        include_path = ssh_dir .. '/' .. include_path
+    end
+    return include_path
+end
+
+-- Recursively collect hosts from a config file and its includes
+local function collect_hosts_from_file(filepath, portflag, visited)
+    visited = visited or {}
+
+    -- Normalize path for visited check
+    local normalized = filepath:gsub('\\', '/'):lower()
+    if visited[normalized] then
+        return w({})
+    end
+    visited[normalized] = true
+
     local matches = w({})
-    local lines = read_lines(clink.get_env("userprofile") .. "/.ssh/config")
+    local lines = read_lines(filepath)
+    local ssh_dir = clink.get_env("userprofile") .. "/.ssh"
+
     for _, line in ipairs(lines) do
         line = line:gsub('(#.*)$', '')
-        local host = line:match('^Host%s+(.*)$')
+
+        -- Check for Include directive
+        local include_pattern = line:match('^%s*[Ii]nclude%s+(.+)%s*$')
+        if include_pattern then
+            local resolved = resolve_include_path(include_pattern, ssh_dir)
+            -- Check if pattern contains glob characters
+            if resolved:match('[%*%?]') then
+                local expanded_files = expand_glob(resolved)
+                for _, inc_file in ipairs(expanded_files) do
+                    local inc_matches = collect_hosts_from_file(inc_file, portflag, visited)
+                    for _, m in ipairs(inc_matches) do
+                        table.insert(matches, m)
+                    end
+                end
+            else
+                local inc_matches = collect_hosts_from_file(resolved, portflag, visited)
+                for _, m in ipairs(inc_matches) do
+                    table.insert(matches, m)
+                end
+            end
+        end
+
+        -- Check for Host directive
+        local host = line:match('^%s*[Hh]ost%s+(.*)$')
         if host then
             for pattern in host:gmatch('([^%s]+)') do
                 if not pattern:match('[%*%?/!]') then
@@ -62,7 +123,14 @@ local function list_ssh_hosts(portflag)
             end
         end
     end
-    return matches:filter()
+
+    return matches
+end
+
+-- read all Host entries in the user's ssh config file and included files
+local function list_ssh_hosts(portflag)
+    local config_path = clink.get_env("userprofile") .. "/.ssh/config"
+    return collect_hosts_from_file(config_path, portflag):filter()
 end
 
 local function list_known_hosts(portflag)
